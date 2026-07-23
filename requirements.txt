@@ -1,0 +1,20 @@
+# Core data processing and computation
+pandas==3.0.2
+numpy==2.4.4
+
+# Machine learning models
+scikit-learn==1.8.0
+xgboost==3.3.0
+
+# Data visualization
+matplotlib==3.10.8
+seaborn==0.13.2
+
+# Statistical computations
+scipy==1.17.1
+
+# Parallel computing and model serialization
+joblib==1.5.3
+
+# Notebooks
+jupyter==1.1.1
