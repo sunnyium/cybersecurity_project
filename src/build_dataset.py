@@ -387,5 +387,5 @@ def add_label_group(df: pd.DataFrame, label_map: dict[str, str] = LABEL_MAP,
     return df
 
 
-#if __name__ == "__main__":
+if __name__ == "__main__":
     build_dataset()
