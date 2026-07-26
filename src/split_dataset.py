@@ -1,23 +1,18 @@
 """
-src/split_dataset.py - loads the merged CICIDS2017 parquet from
-    build_dataset.py, then builds train/test split datasets.
+src/dataset.py - loads the merged CICIDS 2017 parquet from build_dataset.py,
+    then builds train/test split datasets.
 
 Memory: In order to prevent running out of memory as a result of the large
-    amount of data, the code begins by creating one large array upfront. It
+    amount of data, the code begins by creating one large array upfront. It 
     proceeds to fill the array column-by-column and splitting data using INDEX
     ranges.
-Label grouping: reads GROUP_COL from the parquet when build_dataset has
-    materialised it, and falls back to mapping the raw labels through
-    build_dataset.LABEL_MAP when it has not. Either way EXCLUDED rows are
-    dropped before the feature matrix is allocated, so the array is sized to
-    the rows actually kept rather than trimmed afterwards.
-Majority subsampling: available but OFF by default. Capping the majority class
-    would discard ~1.5M benign flows, and benign is the heterogeneous class
-    whose breadth is what keeps false alarms down; class weights rebalance the
-    loss without throwing rows away. When a cap is passed it applies to the
-    TRAINING fold only -- the test fold is never resampled, so reported metrics
-    reflect the real distribution.
-"""
+Label grouping: Uses build_dataset.LABEL_MAP to create label grouping column. 
+    EXCLUDED labels are dropped before the feature matrix is allocated.
+(OPTIONAL ARGUMENT) Majority class subsampling: A large percentage of the data 
+    is BENIGN. We cap BENIGN in the training set to 100k rows while keeping all 
+    attack rows. The test set is not subsampled, so the model will be evaluated 
+    on realistic data."""
+
 import numpy as np
 import pyarrow.parquet as pq
 from sklearn.model_selection import StratifiedShuffleSplit
@@ -31,9 +26,9 @@ NON_FEATURE_COLS = (bd.TARGET, bd.GROUP_COL, bd.SOURCE_COL)
 TARGET = bd.TARGET
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
-# None keeps every training row: imbalance is handled at the model with class
-# weights rather than by discarding benign traffic. Pass an explicit cap to
-# subsample instead -- kept available so the two can be compared.
+
+# Default cap for majority (BENIGN) in the training set
+# None if no cap is wanted
 DEFAULT_TRAIN_CAP = None
 
 
@@ -44,8 +39,8 @@ def feature_columns(path: str = FINAL_PATH):
 
 def grouped_labels(path: str = FINAL_PATH):
     """Return (grouped, keep), where keep masks out the EXCLUDED rows.
-    Uses the materialised GROUP_COL if present, otherwise maps TARGET through
-    LABEL_MAP."""
+    Uses GROUP_COL if available, otherwise use LABEL_MAP"""
+
     names = pq.ParquetFile(path).schema_arrow.names
 
     if bd.GROUP_COL in names:
@@ -88,14 +83,8 @@ def stratified_split_indices(y, test_size=TEST_SIZE, random_state=RANDOM_STATE):
 
 def subsample_majority_train(train_idx, y, cap=DEFAULT_TRAIN_CAP,
                              random_state=RANDOM_STATE):
-    """Cap the majority class in the training index, keeping every other row.
-
-    The majority class is read off the training fold rather than hardcoded, so
-    the cap always lands on whichever class actually dominates. On the full
-    CICIDS2017 merge that is BENIGN (~83% of rows); every attack row survives.
-
-    Test index is never passed here, so the test set is never subsampled.
-    """
+    """Subsamples training dataset if a cap is provided. An array of indicies 
+    for the training set is returned."""
     if cap is None:
         return train_idx
 
@@ -112,9 +101,8 @@ def subsample_majority_train(train_idx, y, cap=DEFAULT_TRAIN_CAP,
 
 
 def load_split(path: str = FINAL_PATH, cap=DEFAULT_TRAIN_CAP):
-    """Convenience: returns a dict with train/test arrays ready for a model.
-    The training majority class is capped; test reflects the true
-    distribution."""
+    """Convenience sampling - returns a dictionary with train/test arrays.
+    Test set reflects actual label distribution."""
     X, y, le, feat = load_Xy(path)
     tr, te = stratified_split_indices(y)
     tr = subsample_majority_train(tr, y, cap=cap)
@@ -127,7 +115,7 @@ def load_split(path: str = FINAL_PATH, cap=DEFAULT_TRAIN_CAP):
         "label_encoder": le,
         "feature_names": feat,
     }
-    del X  # the split copies are built; drop the full matrix
+    del X # Drop full matrix
     return out
 
 
@@ -137,18 +125,13 @@ if __name__ == "__main__":
     print(f"classes: {list(le.classes_)}\n")
 
     tr, te = stratified_split_indices(y)
-    # default is uncapped; 200k shown alongside to make the tradeoff visible
-    demo_cap = 200_000
-    tr_capped = subsample_majority_train(tr, y, cap=demo_cap)
+    tr = subsample_majority_train(tr, y)   # follows DEFAULT_TRAIN_CAP
 
-    before = np.bincount(y[tr], minlength=len(le.classes_))
-    after = np.bincount(y[tr_capped], minlength=len(le.classes_))
+    train = np.bincount(y[tr], minlength=len(le.classes_))
     test = np.bincount(y[te], minlength=len(le.classes_))
 
-    print(f"{'class':<12} {'train (default)':>16} {'cap=' + f'{demo_cap:,}':>14} {'test':>10}")
-    for c in np.argsort(-before):
-        flag = "  <- capped" if after[c] < before[c] else ""
-        print(f"{le.classes_[c]:<12} {before[c]:>16,} {after[c]:>14,} {test[c]:>10,}{flag}")
+    print(f"{'class':<12} {'train':>12} {'test':>12}")
+    for c in np.argsort(-train):
+        print(f"{le.classes_[c]:<12} {train[c]:>12,} {test[c]:>12,}")
 
-    print(f"\ntrain {len(tr):,} rows (default, uncapped) "
-          f"| {len(tr_capped):,} with cap={demo_cap:,} | test {len(te):,} rows")
+    print(f"\ntrain {len(tr):,} rows   test {len(te):,} rows")
