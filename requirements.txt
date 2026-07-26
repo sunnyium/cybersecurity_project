@@ -2,6 +2,10 @@
 pandas==3.0.2
 numpy==2.4.4
 
+# Parquet IO (used directly by src/build_dataset.py; pandas treats it as an
+# optional extra, so it must be pinned explicitly)
+pyarrow==25.0.0
+
 # Machine learning models
 scikit-learn==1.8.0
 xgboost==3.3.0
