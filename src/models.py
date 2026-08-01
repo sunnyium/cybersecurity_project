@@ -39,25 +39,16 @@ PREDICT_CHUNK = 250_000
 # 1. Baseline ladder
 def build_majority_baseline() -> DummyClassifier:
     """Predict the most frequent class (BENIGN) for everything.
-
-    Not a real model -- it is the control. Its accuracy is high and its
-    macro-F1 is near zero, which is the clearest possible demonstration that
-    accuracy is the wrong headline metric on this dataset.
+    This model is used as a baseline and a trained model must beat it
+    even though its accuracy is high and macro-F1 is near zero
     """
     return DummyClassifier(strategy="most_frequent")
 
 
 def build_logistic_baseline(max_iter: int = 200,
     random_state: int = RANDOM_STATE,) -> Pipeline:
-    """Scaled multinomial logistic regression -- the linear reference point.
-
-    Wrapped in a Pipeline so the scaler is fit inside each training fold and
-    never sees test rows.
-
-    Note on cost: lbfgs on the uncapped training set (~2M rows x 69 features)
-    is by far the slowest rung of the ladder. Fit it on a capped training set
-    (see split_dataset.DEFAULT_TRAIN_CAP) unless there is a reason not to.
-    """
+    """Scaled multinomial logistic regression (linear reference point)
+    StandardScaler is fit inside each training fold and never sees test rows."""
     return Pipeline([
         ("scale", StandardScaler()),
         ("clf", LogisticRegression(max_iter=max_iter, random_state=random_state)),
@@ -66,13 +57,9 @@ def build_logistic_baseline(max_iter: int = 200,
 
 def build_xgboost(random_state: int = RANDOM_STATE, **overrides) -> XGBClassifier:
     """Histogram-based gradient boosting for the 7-class problem.
-
-    tree_method='hist' with max_bin=128 buckets each feature instead of
-    sorting every split candidate, which is what makes ~2M rows tractable on
-    a modest machine. num_class is inferred from y at fit time.
-
-    Any parameter can be overridden by keyword, e.g. build_xgboost(max_depth=6).
-    """
+    tree_method='hist' with max_bin=128 sorts each feature inot bins instead
+    of sorting every split candidate. 
+    This makes ~2M rows trainable on a standard computer."""
     params = dict(
         n_estimators=120,
         max_depth=8,
@@ -91,11 +78,8 @@ def build_xgboost(random_state: int = RANDOM_STATE, **overrides) -> XGBClassifie
 # 2. Memory-bounded prediction
 def predict_in_chunks(model, X: np.ndarray, chunk: int = PREDICT_CHUNK) -> np.ndarray:
     """Predicted labels for X, one chunk at a time.
-
-    The test set is never subsampled (split_dataset keeps its true class
-    distribution), so it stays large; predicting in slices bounds peak memory
-    to one chunk of intermediate scores rather than the whole matrix.
-    """
+    The test set is never subsampled and stays large. Predicting in 
+    slices bounds peak memory to chunks of scores."""
     parts = [model.predict(X[s: s + chunk]) for s in range(0, len(X), chunk)]
     return np.concatenate(parts)
 
@@ -103,9 +87,6 @@ def predict_in_chunks(model, X: np.ndarray, chunk: int = PREDICT_CHUNK) -> np.nd
 def predict_proba_in_chunks(model, X: np.ndarray,
     chunk: int = PREDICT_CHUNK,) -> np.ndarray:
     """Class probabilities for X as an (n_rows, n_classes) array, chunked.
-
-    Matters more than predict_in_chunks: the output itself is n_rows x 7
-    float64, roughly 8x the memory of a label vector.
-    """
+    The output is n_rows x 7 float64 using less memory than a label vector."""
     parts = [model.predict_proba(X[s: s + chunk]) for s in range(0, len(X), chunk)]
     return np.concatenate(parts)
