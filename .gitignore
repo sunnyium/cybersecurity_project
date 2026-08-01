@@ -2,4 +2,11 @@ data/*.csv
 __pycache__/
 .venv/
 data/*.parquet
+data/*.json
+data/sampled/
 .vscode/
+.ipynb_checkpoints/
+*.pyc
+node_modules/
+package.json
+package-lock.json
