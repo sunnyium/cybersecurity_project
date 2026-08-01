@@ -299,12 +299,14 @@ def plot_confusion_matrix(y_true, y_pred, names: Sequence[str],
 
     recall = np.diag(disp) if normalize else np.diag(disp) / cm.sum(axis=1)
     weakest = names[int(np.argmin(recall))]
-    plot.add_titles(
-        ax,
-        "Confusion matrix",
+    subtitle = (
         f"row-normalised - the diagonal is per-class recall, weakest is "
-        f"{weakest} at {recall.min():.2f}",
+        f"{weakest} at {recall.min():.2f}"
+        if normalize else
+        f"raw counts - the diagonal is correct predictions, weakest recall is "
+        f"{weakest} at {recall.min():.2f}"
     )
+    plot.add_titles(ax, "Confusion matrix", subtitle)
     return plot.save_figure(fig, save_name)
 
 
