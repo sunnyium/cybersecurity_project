@@ -125,7 +125,7 @@ if __name__ == "__main__":
     print(f"classes: {list(le.classes_)}\n")
 
     tr, te = stratified_split_indices(y)
-    tr = subsample_majority_train(tr, y)   # follows DEFAULT_TRAIN_CAP
+    tr = subsample_majority_train(tr, y) # DEFAULT_TRAIN_CAP
 
     train = np.bincount(y[tr], minlength=len(le.classes_))
     test = np.bincount(y[te], minlength=len(le.classes_))

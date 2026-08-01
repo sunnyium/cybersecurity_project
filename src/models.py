@@ -40,8 +40,7 @@ PREDICT_CHUNK = 250_000
 def build_majority_baseline() -> DummyClassifier:
     """Predict the most frequent class (BENIGN) for everything.
     This model is used as a baseline and a trained model must beat it
-    even though its accuracy is high and macro-F1 is near zero
-    """
+    even though its accuracy is high and macro-F1 is near zero"""
     return DummyClassifier(strategy="most_frequent")
 
 

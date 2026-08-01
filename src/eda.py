@@ -82,9 +82,8 @@ def feature_columns(path: str = FINAL_PATH) -> list[str]:
 
 
 def label_groups(path: str = FINAL_PATH) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Return (groups, keep) for every row in the file where `groups` is the LableGroup
-    and `keep` masks EXCLUDED rows"""
+    """Return (groups, keep) for every row in the file where `groups` is the 
+    LableGroup and `keep` masks EXCLUDED rows"""
     raw = pq.read_table(path, columns=[TARGET]).column(0).to_numpy()
 
     # map the ~15 unique strings rather than the 2.5M rows
@@ -249,9 +248,7 @@ def plot_feature_distributions(sample: pd.DataFrame, features: Sequence[str],
 # 4. Data quality issues that survive stage-1 cleaning
 def negative_value_report(path: str = FINAL_PATH,
     features: Sequence[str] | None = None,) -> pd.DataFrame:
-    """
-    Count negative values per column on the full dataset, one column at a time.
-    """
+    """Count negative values on the full dataset, one column at a time. """
     features = feature_columns(path) if features is None else list(features)
     _, keep = label_groups(path)
     n_kept = int(keep.sum())
@@ -279,10 +276,8 @@ def negative_value_report(path: str = FINAL_PATH,
 
 def impossible_value_rows(path: str = FINAL_PATH,
     exclude: Sequence[str] = SENTINEL_COLS,) -> tuple[int, float]:
-    """
-    Rows carrying at least one negative value outside the sentinel columns.
-    Returns (n_rows, percentage) separating corruption from sentinels.
-    """
+    """Rows carrying at least one negative value outside the sentinel columns.
+    Returns (n_rows, percentage) separating corruption from sentinels."""
     _, keep = label_groups(path)
     n_kept = int(keep.sum())
 

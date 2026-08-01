@@ -78,7 +78,6 @@ def style_axes(ax, grid_axis: str | None = "x",
 def add_titles(ax, title: str, subtitle: str | None = None,
     gap_pt: float = 10, line_pt: float = 14) -> None:
     """Left-aligned title with the finding itself as a grey subtitle.
-
     Offsets are in points from the top-left of the axes to maintain spacing.
     """
     common = dict(xy=(0, 1), xycoords="axes fraction",
