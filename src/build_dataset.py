@@ -10,6 +10,7 @@ Stage 1 (raw CSV -> analysis-ready parquet):
 Stage 2 (label handling / EDA):
     label_by_file() | attack types present in each source file
     label_distribution() | label counts + percentages
+    class_support_table() | label support against the exclusion threshold
     add_label_group() | collapse fine-grained labels into modelling groups
     load_dataset() | read merge_complete.parquet, optionally with LabelGroup applied
 """
@@ -63,8 +64,28 @@ FILE_ORDER = [
 DUPLICATE_COLS = ("Fwd Header Length.1",)
 EXCLUDED_TAG = "EXCLUDED"
 
-# Labels are converted into their respective modelling groups
-# Infiltration (36) and Heartblee (11) are too rare to evaluate and tagged for removal
+# Columns whose values cannot legitimately be negative. A negative duration,
+# rate or header length is counter overflow in CIC-FlowMeter, not a measurement,
+# so those rows are dropped in stage 1.
+#
+# Named in their CamelCase form and matched through to_camel_case, so the check
+# is written once against canonical names and does not depend on the raw
+# spelling of each header. The InitWinBytes columns are deliberately absent:
+# -1 there is a documented "not observed" sentinel, not corruption.
+NONNEGATIVE_COLS = (
+    "FlowDuration", "FlowBytesS", "FlowPacketsS",
+    "FlowIatMean", "FlowIatMax", "FlowIatMin", "FwdIatMin",
+    "FwdHeaderLength", "BwdHeaderLength", "MinSegSizeForward",
+)
+
+# Minimum raw rows for a label to be modelled at all. At TEST_SIZE=0.2 this
+# leaves ~100 test instances; below that a per-class precision or recall moves
+# in visible jumps and cannot be reported in good faith.
+MIN_CLASS_SUPPORT = 500
+
+# Labels are converted into their respective modelling groups.
+# Infiltration (36 rows) and Heartbleed (11) fall far below MIN_CLASS_SUPPORT and
+# are tagged for removal; class_support_table() states that criterion explicitly.
 LABEL_MAP = {
     "BENIGN": "BENIGN",
     "DDoS": "DDoS",
@@ -109,6 +130,24 @@ def _finite_mask(df: pd.DataFrame, exclude: Iterable[str] = ()) -> np.ndarray:
     return mask
 
 
+def _nonnegative_mask(df: pd.DataFrame,
+    nonnegative_cols: Iterable[str] = NONNEGATIVE_COLS) -> np.ndarray:
+    """Row mask that is True where no impossible negative value appears.
+
+    Raw headers are matched by their CamelCase form, so this works on the
+    pre-rename frame without hardcoding the original spellings.
+    """
+    targets = set(nonnegative_cols)
+    mask = np.ones(len(df), dtype=bool)
+    for c in df.columns:
+        if to_camel_case(c) not in targets:
+            continue
+        v = df[c].to_numpy()
+        if np.issubdtype(v.dtype, np.number):
+            mask &= ~(v < 0)
+    return mask
+
+
 # 1. Schema verification
 def read_schemas(files: Sequence[str] = FILE_ORDER, data_dir: str = DATA_DIR,
     drop_cols: Sequence[str] = DUPLICATE_COLS,) -> dict[str, tuple[str, ...]]:
@@ -128,16 +167,21 @@ def n_distinct_schemas(schemas: dict[str, tuple[str, ...]] | None = None) -> int
 
 
 # 2. Within file cleaning and merge separate files
-def clean_file(df: pd.DataFrame, target: str = TARGET, 
-    drop_cols: Sequence[str] = DUPLICATE_COLS, downcast: bool = True,) -> pd.DataFrame:
+def clean_file(df: pd.DataFrame, target: str = TARGET,
+    drop_cols: Sequence[str] = DUPLICATE_COLS, downcast: bool = True,
+    nonnegative_cols: Sequence[str] = NONNEGATIVE_COLS,
+    stats: dict | None = None,) -> pd.DataFrame:
     """
     Clean a single raw day of traffic.
 
     - strips whitespace from headers and drops the repeated header column
     - repairs the mojibake dash in the Web Attack labels
     - drops rows carrying NaN/inf in any numeric feature
+    - drops rows with an impossible negative duration, rate or header length
     - drops exact within-file duplicates
     - downcasts numeric columns to float32
+
+    Pass a dict as `stats` to receive the per-stage row accounting.
     """
     df = df.copy()
     df.columns = df.columns.str.strip()
@@ -147,13 +191,28 @@ def clean_file(df: pd.DataFrame, target: str = TARGET,
         df[target].astype(str).str.strip().str.replace("\ufffd", "-", regex=False)
     )
 
+    n_in = len(df)
     df = df.loc[_finite_mask(df, exclude={target})]
+    n_finite = len(df)
+
+    keep = _nonnegative_mask(df, nonnegative_cols)
+    n_negative = int((~keep).sum())
+    df = df.loc[keep]
+
     df = df.drop_duplicates().copy()
 
     if downcast:
         num_cols = df.select_dtypes(include=[np.number]).columns
         df[num_cols] = df[num_cols].astype(np.float32)
         df = df.loc[_finite_mask(df, exclude={target})].copy()
+
+    if stats is not None:
+        stats.update(
+            rows_in=n_in,
+            dropped_nonfinite=n_in - n_finite,
+            dropped_negative=n_negative,
+            rows_out=len(df),
+        )
 
     return df
 
@@ -170,13 +229,16 @@ def merge_files(files: Sequence[str] = FILE_ORDER, data_dir: str = DATA_DIR,
     writer = None
     schema_ref = None
     counts: dict[str, int] = {}
+    n_negative = 0
 
     try:
         for file in files:
             df = pd.read_csv(os.path.join(data_dir, file), low_memory=False)
-            df = clean_file(df)
+            file_stats: dict[str, int] = {}
+            df = clean_file(df, stats=file_stats)
             df[source_col] = file
 
+            n_negative += file_stats.get("dropped_negative", 0)
             counts[file] = len(df)
             if verbose:
                 print(f"{file}: {len(df):,} rows")
@@ -192,6 +254,9 @@ def merge_files(files: Sequence[str] = FILE_ORDER, data_dir: str = DATA_DIR,
     finally:
         if writer is not None:
             writer.close()
+
+    if verbose:
+        print(f"\nRows dropped by the sign check: {n_negative:,}")
 
     return out_path, counts
 
@@ -365,7 +430,30 @@ def label_distribution(path: str | None = None, target: str = TARGET,
     )
 
 
-def add_label_group(df: pd.DataFrame, label_map: dict[str, str] = LABEL_MAP, 
+def class_support_table(path: str | None = None, label_map: dict[str, str] = LABEL_MAP,
+    target: str = TARGET, min_support: int = MIN_CLASS_SUPPORT,
+    test_size: float = 0.2,) -> pd.DataFrame:
+    """Raw label support measured against the exclusion threshold.
+
+    States the exclusion criterion instead of leaving it implicit in LABEL_MAP.
+    A class has to survive a stratified split and still leave enough test rows
+    to carry a per-class metric; `min_support` rows is the floor, which at a
+    20% test share is ~100 test instances.
+
+    Returns one row per raw label with its count, the test rows it would
+    contribute, whether it clears the floor, and the resulting decision.
+    """
+    tbl = label_distribution(path=path, target=target).copy()
+    tbl["LabelGroup"] = tbl[target].map(label_map)
+    tbl["TestRowsAtSplit"] = (tbl["Count"] * test_size).astype(int)
+    tbl["MeetsMinimum"] = tbl["Count"] >= min_support
+    tbl["Decision"] = np.where(tbl["LabelGroup"] == EXCLUDED_TAG, "EXCLUDE", "keep")
+
+    return tbl[[target, "LabelGroup", "Count", "Percentage",
+                "TestRowsAtSplit", "MeetsMinimum", "Decision"]]
+
+
+def add_label_group(df: pd.DataFrame, label_map: dict[str, str] = LABEL_MAP,
     target: str = TARGET, group_col: str = GROUP_COL, drop_excluded: bool = True,
     ) -> pd.DataFrame:
     """

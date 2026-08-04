@@ -7,6 +7,7 @@ Class balance:
     class_distribution() | grouped label counts + percentages on the full dataset
     imbalance_ratio() | largest class and smallest class comparisons
     plot_class_distribution() | horizontal bar chart on log axis of class distribution
+    plot_class_support_threshold() | raw label support against the exclusion floor
 
 Sampling:
     stratified_sample() | pre-class reproducible sample of the full dataset
@@ -66,12 +67,11 @@ RANDOM_STATE = 42
 SENTINEL_COLS = ("InitWinBytesForward", "InitWinBytesBackward")
 SENTINEL_VALUE = -1.0
 
-# Column values that can not be negative
-NONNEGATIVE_COLS = (
-    "FlowDuration", "FlowBytesS", "FlowPacketsS",
-    "FlowIatMean", "FlowIatMax", "FlowIatMin", "FwdIatMin",
-    "FwdHeaderLength", "BwdHeaderLength", "MinSegSizeForward",
-)
+# Column values that can not be negative. Owned by build_dataset because the
+# stage-1 sign check enforces it; re-exported here so the EDA reads from one
+# source of truth rather than a second copy that can drift.
+NONNEGATIVE_COLS = bd.NONNEGATIVE_COLS
+MIN_CLASS_SUPPORT = bd.MIN_CLASS_SUPPORT
 
 
 # Helper functions
@@ -114,6 +114,54 @@ def imbalance_ratio(dist: pd.DataFrame | None = None, path: str = FINAL_PATH) ->
     """Majority class size divided by minority class size."""
     dist = class_distribution(path) if dist is None else dist
     return float(dist["Count"].max() / dist["Count"].min())
+
+
+def plot_class_support_threshold(table: pd.DataFrame | None = None,
+    min_support: int = MIN_CLASS_SUPPORT,
+    save_name: str = "class_support_threshold.png",) -> str:
+    """Raw label support on a log axis against the exclusion threshold.
+
+    Shows that dropping Infiltration and Heartbleed is not a marginal call:
+    both sit orders of magnitude below the floor, and the log axis is what
+    makes that legible next to a 2M-row majority.
+    """
+    table = bd.class_support_table() if table is None else table
+    rows = table.sort_values("Count")
+
+    counts = rows["Count"].to_numpy()
+    labels = rows[bd.TARGET].to_numpy()
+    excluded = rows["Decision"].to_numpy() == "EXCLUDE"
+    y = np.arange(len(counts))
+
+    fig, ax = plt.subplots(figsize=(9, 0.34 * len(counts) + 2.4))
+    ax.barh(y, counts, height=0.72, zorder=3,
+            color=[plot.ACCENT if e else plot.PRIMARY for e in excluded])
+
+    ax.set_xscale("log")
+    ax.set_xlim(10 ** np.floor(np.log10(counts.min())), counts.max() * 2.4)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=plot.TICK_SIZE)
+    plot.thousands(ax, "x")
+    plot.style_axes(ax, grid_axis="x")
+
+    ax.axvline(min_support, color=plot.EDGE_COLOR, ls="--", lw=1.1, zorder=4)
+    ax.annotate(f"{min_support:,}-row minimum", xy=(min_support, len(counts) - 0.4),
+                xytext=(6, 0), textcoords="offset points", va="center",
+                fontsize=plot.TICK_SIZE, color=plot.EDGE_COLOR)
+
+    for yi, v in zip(y, counts):
+        ax.annotate(f"{v:,}", xy=(v, yi), xytext=(6, 0),
+                    textcoords="offset points", va="center",
+                    fontsize=plot.TICK_SIZE, color="0.25")
+
+    ax.set_xlabel("rows (log scale)", fontsize=plot.LABEL_SIZE, labelpad=8)
+    dropped = ", ".join(labels[excluded]) if excluded.any() else "none"
+    plot.add_titles(
+        ax,
+        "Class support against the exclusion threshold",
+        f"orange falls below the {min_support:,}-row floor and is excluded: {dropped}",
+    )
+    return plot.save_figure(fig, save_name)
 
 
 def plot_class_distribution(dist: pd.DataFrame | None = None,path: str = FINAL_PATH,
@@ -484,9 +532,16 @@ def plot_correlation_heatmap(sample: pd.DataFrame, features: Sequence[str] | Non
 
 
 if __name__ == "__main__":
+    support = bd.class_support_table()
+    print(support.to_string(index=False))
+    print(f"\n{plot_class_support_threshold(support)}\n")
+
     dist = class_distribution()
     print(dist.to_string(index=False))
     print(f"\nImbalance ratio: {imbalance_ratio(dist):,.1f} : 1")
+
+    n_bad, pct_bad = impossible_value_rows()
+    print(f"\nImpossible negatives surviving stage 1: {n_bad:,} ({pct_bad}%)")
 
     sample = stratified_sample()
     print(f"\nSample: {len(sample):,} rows")

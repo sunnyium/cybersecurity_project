@@ -18,7 +18,12 @@ Error structure:
 
 Feature attribution:
     feature_importance() | gain-based importance as a sorted table
+    collapse_aliases() | sum gain across pairs holding identical values
     plot_feature_importance() | the top-N features
+
+Operating point:
+    threshold_sweep() | precision/recall for one class as its threshold moves
+    plot_threshold_sweep() | the same sweep as a curve
 
 Stability:
     cross_val_macro_f1() | stratified k-fold macro-F1, mean and spread
@@ -72,6 +77,21 @@ LADDER_LABELS = {
 }
 
 CV_SPLITS = 5
+
+# Feature pairs verified identical on the full dataset in notebook 02. A tree
+# splits gain arbitrarily between two identical columns, so importance is read
+# after summing each pair onto its first member. The two pairs that looked
+# identical on the sample but failed full-data verification
+# (TotalLengthOfFwdPackets/SubflowFwdBytes, RstFlagCount/EceFlagCount) are
+# deliberately absent.
+ALIAS_PAIRS = (
+    ("TotalFwdPackets", "SubflowFwdPackets"),
+    ("TotalBackwardPackets", "SubflowBwdPackets"),
+    ("FwdPacketLengthMean", "AvgFwdSegmentSize"),
+    ("BwdPacketLengthMean", "AvgBwdSegmentSize"),
+    ("FwdPshFlags", "SynFlagCount"),
+    ("FwdUrgFlags", "CweFlagCount"),
+)
 
 # White -> PRIMARY
 CONFUSION_CMAP = LinearSegmentedColormap.from_list(
@@ -241,7 +261,9 @@ def plot_baseline_ladder(table: pd.DataFrame,
     plot.style_axes(ax, grid_axis="x")
 
     ax.set_xlabel("score", fontsize=plot.LABEL_SIZE, labelpad=8)
-    ax.legend(frameon=False, fontsize=plot.TICK_SIZE, loc="lower right", ncols=2)
+    # Anchored above the axes: inside the plot it sits on top of the top rung's bars.
+    ax.legend(frameon=False, fontsize=plot.TICK_SIZE, ncols=2,
+              loc="lower right", bbox_to_anchor=(1.0, 1.0))
 
     worst = table.loc[table["MacroF1"].idxmin()]
     best = table.loc[table["MacroF1"].idxmax()]
@@ -357,6 +379,37 @@ def feature_importance(model, feature_names: Sequence[str],
     return imp.head(top) if top else imp
 
 
+def collapse_aliases(imp: pd.DataFrame,
+    pairs: Sequence[tuple[str, str]] = ALIAS_PAIRS,) -> pd.DataFrame:
+    """Sum gain across feature pairs that hold identical values.
+
+    Two identical columns compete for the same splits, so a tree hands part of
+    the gain to each and both look less important than the quantity they
+    measure. Total importance is unchanged; the rows are just no longer
+    double-counted.
+
+    Adds a CollapsedWith column naming the twin that was folded in, so the
+    table stays auditable rather than silently rewriting feature names.
+    """
+    gain = dict(zip(imp["Feature"], imp["Importance"].astype(float)))
+    folded: dict[str, str] = {}
+
+    for keep, drop in pairs:
+        if keep in gain and drop in gain:
+            gain[keep] += gain.pop(drop)
+            folded[keep] = drop
+
+    return (
+        pd.DataFrame({
+            "Feature": list(gain),
+            "Importance": list(gain.values()),
+            "CollapsedWith": [folded.get(f, "") for f in gain],
+        })
+        .sort_values("Importance", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 def plot_feature_importance(imp: pd.DataFrame, top: int = 15,
     save_name: str = "feature_importance.png",) -> str:
     """Horizontal bars for the top-N features by gain."""
@@ -380,7 +433,94 @@ def plot_feature_importance(imp: pd.DataFrame, top: int = 15,
     return plot.save_figure(fig, save_name)
 
 
-# 5. Stability
+# 5. Operating point
+def threshold_sweep(model, split: dict, target_class: str,
+    names: Sequence[str] | None = None,
+    thresholds: Sequence[float] | None = None,) -> pd.DataFrame:
+    """Precision and recall for one class as its decision threshold moves.
+
+    Taking the argmax over probabilities is one operating point, not the only
+    one available. For a minority class whose false positives come from a much
+    larger class, the useful question is what precision is reachable and what
+    recall it costs.
+
+    A row is assigned `target_class` when its probability clears the threshold;
+    otherwise it falls back to the argmax over the remaining classes, so the
+    other six classes are never left unpredicted.
+    """
+    names = class_names(split) if names is None else list(names)
+    idx = names.index(target_class)
+
+    proba = md.predict_proba_in_chunks(model, split["X_test"])
+    y_true = split["y_test"]
+
+    # argmax ignoring the target column, used wherever the threshold is not met
+    masked = proba.copy()
+    masked[:, idx] = -1.0
+    fallback = masked.argmax(axis=1)
+
+    if thresholds is None:
+        thresholds = np.round(np.arange(0.05, 1.0, 0.05), 2)
+
+    rows = []
+    for t in thresholds:
+        pred = np.where(proba[:, idx] >= t, idx, fallback)
+        p, r, f, _ = precision_recall_fscore_support(
+            y_true, pred, labels=[idx], average=None, zero_division=0
+        )
+        rows.append({
+            "Threshold": float(t),
+            "Precision": round(float(p[0]), 4),
+            "Recall": round(float(r[0]), 4),
+            "F1": round(float(f[0]), 4),
+            "MacroF1": round(
+                float(f1_score(y_true, pred, average="macro", zero_division=0)), 4
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def plot_threshold_sweep(sweep: pd.DataFrame, target_class: str,
+    save_name: str | None = None,) -> str:
+    """Precision, recall and F1 for one class against its decision threshold."""
+    save_name = save_name or f"threshold_sweep_{target_class.lower()}.png"
+    t = sweep["Threshold"].to_numpy()
+
+    fig, ax = plt.subplots(figsize=(9, 4.6))
+    ax.plot(t, sweep["Precision"], color=plot.PRIMARY, lw=2, label="Precision", zorder=3)
+    ax.plot(t, sweep["Recall"], color=plot.MUTED, lw=2, label="Recall", zorder=3)
+    ax.plot(t, sweep["F1"], color=plot.ACCENT, lw=1.6, ls="--", label="F1", zorder=3)
+
+    best = sweep.loc[sweep["F1"].idxmax()]
+    ax.axvline(best["Threshold"], color=plot.EDGE_COLOR, ls=":", lw=1.1, zorder=2)
+    ax.annotate(
+        f"best F1 {best['F1']:.3f} at {best['Threshold']:.2f}\n"
+        f"precision {best['Precision']:.3f}, recall {best['Recall']:.3f}",
+        xy=(best["Threshold"], 0.06), xytext=(8, 0), textcoords="offset points",
+        fontsize=plot.TICK_SIZE, color=plot.EDGE_COLOR, va="bottom",
+    )
+
+    ax.set_xlim(t.min(), t.max())
+    ax.set_ylim(0, 1.04)
+    plot.style_axes(ax, grid_axis="y", flat_ticks="both")
+    ax.set_xlabel(f"probability threshold for {target_class}",
+                  fontsize=plot.LABEL_SIZE, labelpad=8)
+    ax.legend(frameon=False, fontsize=plot.TICK_SIZE, ncols=3,
+              loc="lower right", bbox_to_anchor=(1.0, 1.0))
+
+    at_half = sweep.loc[(sweep["Threshold"] - 0.5).abs().idxmin()]
+    plot.add_titles(
+        ax,
+        f"{target_class} precision against recall, by threshold",
+        f"raising the bar from {at_half['Threshold']:.2f} to {best['Threshold']:.2f} "
+        f"moves precision {at_half['Precision']:.3f} -> {best['Precision']:.3f} "
+        f"for recall {at_half['Recall']:.3f} -> {best['Recall']:.3f}",
+    )
+    return plot.save_figure(fig, save_name)
+
+
+# 6. Stability
 def cross_val_macro_f1(X, y, build=md.build_xgboost, n_splits: int = CV_SPLITS,
     random_state: int = RANDOM_STATE, verbose: bool = True,) -> dict:
     """Stratified k-fold macro-F1, to remove the chance a single split is lucky.
@@ -422,5 +562,13 @@ if __name__ == "__main__":
     print(f"\n{plot_baseline_ladder(ladder['table'])}")
     print(plot_confusion_matrix(split["y_test"], pred, names))
 
-    imp = feature_importance(ladder["models"]["xgboost"], split["feature_names"])
+    imp = collapse_aliases(
+        feature_importance(ladder["models"]["xgboost"], split["feature_names"])
+    )
     print(plot_feature_importance(imp))
+
+    weakest = per_class_report(split["y_test"], pred, names).sort_values("Precision")
+    target = str(weakest.iloc[0]["Class"])
+    sweep = threshold_sweep(ladder["models"]["xgboost"], split, target, names=names)
+    print(f"\n{sweep.to_string(index=False)}")
+    print(plot_threshold_sweep(sweep, target))
